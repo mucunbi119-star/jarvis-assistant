@@ -21,7 +21,7 @@ if not exist ".venv\Scripts\python.exe" goto :failed
 ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r requirements.txt
 if errorlevel 1 goto :failed
 echo.
-echo 準備ができました。次は start.bat をダブルクリックしてください。
+echo 準備ができました。何かキーを押して続けてください。
 pause
 exit /b 0
 :python_missing
