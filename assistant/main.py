@@ -7,13 +7,15 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import httpx
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import ai, documents, store, tables
+from . import ai, documents, free_search, local_ai, store, tables
 from .config import STATIC_DIR
+from .net import read_page
 
 active_tasks = {}
 research_tasks = {}
@@ -29,6 +31,7 @@ async def lifespan(app):
     yield
     for task in list(active_tasks.values()) + list(research_tasks.values()):
         task.cancel()
+    await local_ai.cancel_download()
     await integrations.browser_stop()
 
 
@@ -78,6 +81,7 @@ def health():
 
 def capabilities():
     return {'openai_configured': ai.available(), 'demo': True, 'web_search': ai.available(),
+            'local': True, 'local_model_default': 'qwen3:4b', 'free_search': True,
             'documents': True, 'tables': True, 'wake_word': False,
             'speech': 'ブラウザの日本語音声・音声認識の対応状況に依存します。',
             'chatgpt_automation': False}
@@ -103,7 +107,7 @@ def settings_update(values: dict = Body(...)):
         if not isinstance(current[key], str) or len(current[key]) > 40 or (key == 'assistant_name' and not current[key].strip()):
             raise HTTPException(400, '名前は40文字以内で設定してください。AIの名前は必須です。')
         current[key] = current[key].strip()
-    for key, allowed in [('tone', ('polite', 'friendly', 'concise')), ('answer_length', ('short', 'standard', 'long')), ('mode', ('demo', 'live'))]:
+    for key, allowed in [('tone', ('polite', 'friendly', 'concise')), ('answer_length', ('short', 'standard', 'long')), ('mode', ('demo', 'local', 'live'))]:
         if current[key] not in allowed:
             raise HTTPException(400, '設定の選択肢が不正です。')
     if not isinstance(current['timezone'], str):
@@ -121,7 +125,24 @@ def settings_update(values: dict = Body(...)):
         raise HTTPException(400, 'オン・オフの設定が不正です。')
     if current['mode'] == 'live' and not ai.available():
         raise HTTPException(400, 'API キーが未設定です。.env を設定して再起動してください。')
+    current['local_model'] = local_ai.validate_model(current['local_model'])
     return store.save_settings(current)
+
+
+@app.get('/api/local/status')
+async def local_status():
+    return await local_ai.status(store.get_settings())
+
+
+@app.post('/api/local/download')
+async def local_download(body: dict = Body(...)):
+    require_confirm(body)
+    return await local_ai.begin_download(body.get('model', 'qwen3:4b'))
+
+
+@app.post('/api/local/download/cancel')
+async def local_download_cancel():
+    return await local_ai.cancel_download()
 
 
 @app.get('/api/conversations')
@@ -242,8 +263,47 @@ def local_command(text, settings, cid):
     if re.search('登録した.*(?:開|起動)', text):
         return {'content': '登録アプリ画面で対象を選んで起動してください。登録されていないコマンドは実行しません。', 'actions': [{'type': 'launchers'}]}
     if re.search('CSV.*(?:集計|グラフ)|棒グラフ|折れ線グラフ|円グラフ', text, re.I) or (settings['mode'] == 'demo' and re.search('(?:表|Excel|エクセル).*(?:作|まとめ|保存)', text, re.I)):
-        return {'content': '表・ファイル画面で CSV・Excel を取り込み、列名を指定して集計・並べ替え・グラフ作成できます。AIで表の案を作る場合は、実サービスモードで「表の案」と質問してください。', 'actions': [{'type': 'files'}]}
+        return {'content': '表・ファイル画面で CSV・Excel を取り込み、列名を指定して集計・並べ替え・グラフ作成できます。AIで表を作る場合は、ローカルAIまたは実サービスモードで依頼してください。', 'actions': [{'type': 'files'}]}
     return None
+
+
+def needs_web_search(text):
+    """Explicit research and freshness cues; never parse fetched data as tool requests."""
+    if '取得したページ本文' in text:
+        return False
+    if re.search(r'(?:検索|調査)(?:は|を)?(?:しない|不要)|(?:Web|ネット|インターネット).*使わず', text, re.I):
+        return False
+    return bool(re.search(r'最新|今日|ニュース|調べ|検索|調査|料金|(?:Web|ネット|インターネット).*(?:探|調)|公式.*(?:確認|情報)', text, re.I))
+
+
+async def local_answer(settings, messages, excerpts=None, web=False, url=None):
+    """Local inference and unpaid public search. Failure never selects paid APIs."""
+    page, context = None, None
+    if url:
+        try:
+            page = await read_page(url)
+        except httpx.HTTPError as exc:
+            raise ValueError('指定ページを取得できませんでした。公開状態・接続・アクセス制限をご確認ください。本文を読めていないため、要約は作成していません。') from exc
+    elif web:
+        context = await free_search.search(messages[-1]['content'])
+        if not context.get('results'):
+            raise ValueError('検索結果を取得できませんでした。情報を確認していないため、調査結果は生成しません。')
+    result = await local_ai.respond(settings, messages, excerpts=excerpts or [], web_context=context, page=page)
+    # These are actual input sources. Never build clickable citations from generated text.
+    result['sources'] = []
+    if page:
+        result['sources'].append(dict(title=page['title'], url=page['url'], retrieved_at=store.now(),
+                                      note='公開ページ本文を取得' + ('（先頭24,000文字まで）' if page.get('truncated') else '。') +
+                                           'ローカルAIには、さらに容量に合わせた抜粋を渡しています。'))
+    if context:
+        for source in context['results']:
+            citation = {key: source.get(key, '') for key in ('title', 'url', 'retrieved_at', 'note')}
+            citation['note'] += ' ローカルAIには関連部分の短い抜粋を渡しています。'
+            result['sources'].append(citation)
+        if context.get('warnings'):
+            result['content'] += '\n\n調査時の注意: ' + ' / '.join(context['warnings'])
+    result['demo'] = False
+    return result
 
 
 @app.post('/api/chat')
@@ -270,16 +330,21 @@ async def chat(body: ChatInput):
             excerpts = documents.search_documents(text, body.document_ids)
             url_match = re.search(r'https?://[^\s<>「」]+', text)
             url = url_match.group(0).rstrip('。）」)') if url_match and '取得したページ本文' not in text else None
-            web = body.web or bool(re.search('最新|今日|ニュース|調べて|検索して|料金', text))
+            web = body.web or needs_web_search(text)
             if settings['mode'] == 'demo':
                 result = ai.demo_reply(settings, text, excerpts, web, url)
+            elif settings['mode'] == 'local':
+                result = await local_answer(settings, store.conversation(cid)['messages'], excerpts, web=web and not url, url=url)
             else:
                 result = await ai.respond(settings, store.conversation(cid)['messages'], excerpts, web=web and not url, url=url)
             if excerpts and not web and not url:
                 result.setdefault('sources', []).extend([dict(title=e['name'], location=e['location'], document_id=e['id'], retrieved_at=store.now(), note='質問に関連して送信した資料の抜粋。回答で実際に利用した箇所は本文をご確認ください。') for e in excerpts])
-            if settings['mode'] == 'live' and re.search('(?:表|Excel|エクセル).*(?:作|まとめ|保存)|(?:表|Excel|エクセル)に', text, re.I):
+            if settings['mode'] in ('local', 'live') and re.search('(?:表|Excel|エクセル).*(?:作|まとめ|保存)|(?:表|Excel|エクセル)に', text, re.I):
                 try:
-                    spec = await ai.table_from_answer(result['content'], result.get('sources', []))
+                    if settings['mode'] == 'local':
+                        spec = await local_ai.table_from_answer(result['content'], result.get('sources', []), settings)
+                    else:
+                        spec = await ai.table_from_answer(result['content'], result.get('sources', []))
                     result['table'] = tables.create_table(spec)
                     result['content'] += '\n\nExcel・CSVを作成しました。表・作成ファイル画面で確認して保存してください。'
                     result['actions'] = [{'type': 'files'}]
@@ -288,7 +353,9 @@ async def chat(body: ChatInput):
         answer = store.add_message(cid, 'assistant', result['content'], result.get('sources'), result.get('demo', False))
         return {'conversation_id': cid, 'message': answer, 'actions': result.get('actions', []), 'table': result.get('table')}
     except asyncio.CancelledError:
-        store.add_message(cid, 'assistant', '処理を停止しました。完了した回答は取得していません。外部サービスへ送信済みの処理や料金は取り消せない場合があります。')
+        note = ('有料APIは使用していません。Ollama側や検索先で開始済みの処理が残る場合があります。'
+                if settings['mode'] == 'local' else '外部サービスへ送信済みの処理や料金は取り消せない場合があります。')
+        store.add_message(cid, 'assistant', '処理を停止しました。完了した回答は取得していません。' + note)
         return JSONResponse({'detail': '処理を停止しました。'}, status_code=409)
     finally:
         if active_tasks.get(cid) is task:
@@ -300,7 +367,7 @@ async def cancel(body: dict = Body(...)):
     task = active_tasks.get(body.get('conversation_id'))
     if task:
         task.cancel()
-    return {'stopped': bool(task), 'note': '送信済みの外部処理や課金の取り消しは保証できません。'}
+    return {'stopped': bool(task), 'note': '開始済みの処理や送信済みデータの取り消しは保証できません。'}
 
 
 class ResearchInput(BaseModel):
@@ -323,9 +390,13 @@ async def research(body: ResearchInput):
     task = asyncio.current_task()
     research_tasks[rid] = task
     try:
+        if settings['mode'] == 'local':
+            return await local_answer(settings, [{'role': 'user', 'content': body.query}], web=not bool(url), url=url)
         return await ai.respond(settings, [{'role': 'user', 'content': body.query}], web=not bool(url), url=url)
     except asyncio.CancelledError:
-        return JSONResponse({'detail': '調査を停止しました。外部に送信済みの処理や料金は取り消せない場合があります。'}, status_code=409)
+        note = ('有料APIは使用していません。Ollama側や検索先で開始済みの処理が残る場合があります。'
+                if settings['mode'] == 'local' else '外部に送信済みの処理や料金は取り消せない場合があります。')
+        return JSONResponse({'detail': '調査を停止しました。' + note}, status_code=409)
     finally:
         if research_tasks.get(rid) is task:
             research_tasks.pop(rid, None)
@@ -336,7 +407,7 @@ async def cancel_research(body: dict = Body(...)):
     task = research_tasks.get(body.get('request_id'))
     if task:
         task.cancel()
-    return {'stopped': bool(task), 'note': '送信済みの外部処理や課金の取り消しは保証できません。'}
+    return {'stopped': bool(task), 'note': '開始済みの処理や送信済みデータの取り消しは保証できません。'}
 
 
 app.include_router(documents.router)

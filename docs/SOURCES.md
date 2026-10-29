@@ -34,3 +34,16 @@ Google と Chrome 操作の公式資料は [INTEGRATIONS.md](INTEGRATIONS.md) �
 ## WindowsでのPython準備（2026-10-29追記）
 
 [Python公式Windowsガイドの現行ソース](https://github.com/python/cpython/blob/main/Doc/using/windows.rst)を実際に取得しました。新旧ランチャーの`py -0p`互換と、Python install managerが管理ツールとランタイムを分けて扱うこと、`PYTHON_MANAGER_AUTOMATIC_INSTALL`で検出中の自動インストールを止められることを確認しました。配布バッチは既存のPythonだけを検出し、インストーラーは自動実行しません。公式ダウンロード先は https://www.python.org/downloads/windows/ です。
+
+## Ollama と無料の公開ページ検索（2026-10-29追記）
+
+以下の Ollama 公式リポジトリの現行ソースを、実装時に HTTP 200 で取得して確認しました。`windows.md` と `faq.md` の旧パスは 404 のため、移行先の `.mdx` を確認しました。
+
+- [公式 README](https://github.com/ollama/ollama/blob/main/README.md): Windows 公式インストーラーの入手先。アプリは公式サイトへの案内だけを行い、インストーラーを自動実行しません。
+- [公式 API](https://github.com/ollama/ollama/blob/main/docs/api.md): `localhost:11434` の `/api/chat`、`stream:false`、JSON Schema 形式、ローカルモデル一覧 `/api/tags`、詳細 `/api/show`、モデル取得 `/api/pull`。中断したモデル取得が再利用される場合があること。
+- [公式 Windows ガイド](https://github.com/ollama/ollama/blob/main/docs/windows.mdx): Windows 10 22H2 以降、インストール本体に 4 GB 以上とモデル用の追加容量が必要なこと、Windows のバックグラウンド起動と保存先。
+- [公式 FAQ](https://github.com/ollama/ollama/blob/main/docs/faq.mdx): ローカル処理とクラウド処理の違い、`OLLAMA_NO_CLOUD=1` または `disable_ollama_cloud` 設定、設定変更後の Ollama 再起動、ループバックへの標準バインド。
+
+画面で案内するモデル `qwen3:4b` はローカル用の初期選択です。利用者の PC での速度やメモリ使用量を保証せず、モデルの取得が確認できるまで利用可能と表示しません。
+
+無料検索は DuckDuckGo の公開 HTML 検索ページを取得する実装であり、公式 API の提供・利用枠・可用性を確認できたという意味ではありません。アクセス制限やページ変更によって使えない可能性があることを画面と説明に表示し、CAPTCHA や制限は回避しません。検索サイトへの実接続確認と、固定 HTML を使った解析テストは区別して記録します。

@@ -1,5 +1,6 @@
 """会話と長期記憶を分けて保存する。秘密情報は保存しない。"""
 import json
+import os
 import re
 import sqlite3
 import uuid
@@ -10,7 +11,8 @@ from .config import DB_PATH
 
 DEFAULTS = dict(assistant_name='ルミナ', user_name='', tone='polite', answer_length='standard',
                 timezone='Asia/Tokyo', mode='demo', voice_uri='', speech_rate=1.0,
-                speech_volume=0.8, speech_enabled=False, onboarding_complete=False)
+                speech_volume=0.8, speech_enabled=False, onboarding_complete=False,
+                local_model=os.environ.get('OLLAMA_MODEL', 'qwen3:4b'))
 
 
 def now():
