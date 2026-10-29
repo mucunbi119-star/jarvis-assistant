@@ -30,3 +30,7 @@ Google と Chrome 操作の公式資料は [INTEGRATIONS.md](INTEGRATIONS.md) �
 - [Microsoft Edge の音声認識 API に関する公式説明](https://learn.microsoft.com/microsoft-edge/web-platform/web-speech-api)
 
 ブラウザが実際に返す日本語対応の `SpeechSynthesisVoice` だけを表示します。声の一覧は Windows・ブラウザに依存し、すべての環境で同じ声を保証しません。`localService` が偽の音声はネットワークサービスの可能性を表示します。音声認識は Chrome 等のブラウザ実装に依存し、音声がブラウザ提供者のサーバーへ送信される場合があります。マイク利用前に案内します。音声機能自体にこのアプリから OpenAI 音声 API を呼ぶ処理はありません。上記音声サイト本文のネットワーク取得・Windows 音声の実機検証は未実施です。
+
+## WindowsでのPython準備（2026-10-29追記）
+
+[Python公式Windowsガイドの現行ソース](https://github.com/python/cpython/blob/main/Doc/using/windows.rst)を実際に取得しました。新旧ランチャーの`py -0p`互換と、Python install managerが管理ツールとランタイムを分けて扱うこと、`PYTHON_MANAGER_AUTOMATIC_INSTALL`で検出中の自動インストールを止められることを確認しました。配布バッチは既存のPythonだけを検出し、インストーラーは自動実行しません。公式ダウンロード先は https://www.python.org/downloads/windows/ です。
